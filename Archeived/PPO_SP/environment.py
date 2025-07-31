@@ -1,0 +1,242 @@
+import gymnasium as gym
+
+import numpy as np
+
+from typing import Optional
+from gymnasium import spaces
+import random
+import heapq,copy
+
+min_bw, max_bw = (5, 5)
+min_buffer, max_buffer = (10, 10)
+min_uniform_gen, max_uniform_gen = (1, 5)
+
+min_delay, max_delay = (0, 5)
+min_loss_rate, max_loss_rate = (0.05, 0.5) 
+
+
+class Device():
+    def __init__(self, device_id, gen_mode="uniform", max_step=100):
+        self.device_id = device_id
+        self.gen_mode = gen_mode
+        self.sys_time = 0
+        self.max_step = max_step
+
+        self.delay_bound = random.randint(min_delay, max_delay)
+        self.loss_rate = random.uniform(min_loss_rate, max_loss_rate)
+        self.next_gen_time = self.step_next_gen() % self.max_step
+
+    def step(self, event_time):
+        if event_time == self.next_gen_time:
+            self.sys_time = event_time
+            self.next_gen_time = (self.next_gen_time + self.step_next_gen()) % self.max_step
+
+    def step_next_gen(self):
+        if self.gen_mode == "uniform":
+            return round(random.uniform(min_uniform_gen, max_uniform_gen))
+        else:
+            raise NotImplementedError("Packet generation mode not implemented: {}".format(self.gen_mode))
+
+    def get_sys_time(self):
+        return self.sys_time
+
+    def get_id(self):
+        return self.device_id
+    
+    def get_delay(self):
+        return random.randint(self.delay_bound, self.delay_bound * 2)
+    
+    def get_loss_rate(self):
+        return self.loss_rate
+
+    def reset(self):
+        self.sys_time = 0
+        self.next_gen_time = self.step_next_gen()
+
+
+class Link():
+    def __init__(self, bandwidth=None, buffer_size=None):
+        self.bandwidth = bandwidth if bandwidth is not None else random.randint(min_bw, max_bw)
+        self.buffer_size = buffer_size if buffer_size is not None else random.randint(min_buffer, max_buffer)
+
+        self.airline = []
+        self.buffer = []
+
+    def get_packets_to_process(self, event_time): 
+        # move packets from airline to buffer if there is any:
+        while len(self.airline) > 0 and len(self.buffer) <= self.buffer_size and self.airline[0][0] <= event_time:
+            packet = heapq.heappop(self.airline)
+            self.buffer.append(packet)
+            
+        # remove all delayed packets that cannot log in to the buffer from the airline
+        while len(self.airline) > 0 and self.airline[0][0] <= event_time:
+            packet = heapq.heappop(self.airline)
+        packets_to_process = copy.deepcopy(self.buffer[:self.bandwidth])
+        self.buffer = copy.deepcopy(self.buffer[self.bandwidth:])
+
+        return packets_to_process
+
+    def packet_enter_line(self, event_time, device):
+        packet_process_time = event_time + device.get_delay()
+        packet_system_time = device.get_sys_time()
+        packet_device_id = device.get_id()
+
+        if random.random() > device.get_loss_rate():
+            packet = (packet_process_time, packet_system_time, random.random(), packet_device_id)
+            heapq.heappush(self.airline, packet)
+   
+    def reset(self):
+        self.airline = []
+        self.buffer = []
+
+
+class Service():
+    def __init__(self,  device_num:int):
+        self.device_num = device_num
+        self.device_priority = [random.randint(1, 10) for _ in range(self.device_num)]  # Random priority for each device
+        #self.push_limit = random.randint(1, self.device_num) 
+        self.push_limit = device_num // 2
+
+    def service_update(self):
+        #self.device_priority = [ random.randint(0, 10) for _ in range(self.device_num)]  # Random priority for each device
+        self.push_limit = self.device_num // 2
+
+    def get_device_priority(self):
+        return self.device_priority
+    
+    def get_push_limit(self):
+        return self.push_limit  # Random push limit for the service
+
+
+class DTN(gym.Env):
+    def __init__(self, device_num: int = 10):
+        
+        self.max_step = 500
+        self.left_frame = self.max_step
+        self.device_num = device_num
+
+        self.devices = [Device(id, gen_mode='uniform', max_step=self.max_step) for id in range(self.device_num)]
+        self.service = Service(device_num=self.device_num)
+        self.link = Link()
+
+        self.cur_time = 0
+        self.sys_time = np.array([int(0) for _ in range(self.device_num)])
+        self.last_schedule = np.array([int(0) for _ in range(self.device_num)])
+
+        self.edge_aoi = np.array([int(1) for _ in range(self.device_num)], dtype=np.float32)
+        #self.service_aoi = np.array([int(1) for _ in range(self.device_num)], dtype=np.float32)
+
+        # State: [Service AOI, Edge AOI, SCHEDULE_SENT, ACK_SENT, WEIGHT_OF DEVICE, K]
+        self.observation_space = spaces.Box(
+            low = np.array([0 for _ in range(3 * self.device_num + 3)], dtype=np.float32),
+            high = np.array([np.finfo(np.float32).max for _ in range(3 * self.device_num + 3)], dtype=np.float32))
+        
+        #self.action_s_space = spaces.Discrete(self.device_num)
+        self.action_s_space = spaces.MultiBinary(self.device_num)
+        self.action_p_space = spaces.Box(low=0, high=1, shape=(self.device_num,), dtype=np.float32)
+
+    def get_cur_time(self):
+        return self.cur_time
+    
+    def step_cur_time(self):
+        self.cur_time += 1
+        self.left_frame -= 1
+    
+    def process_packets(self, packets, event_time):
+        for packet in packets:
+            _, sys_time, _, device_id = packet
+            self.sys_time[device_id] = max(self.sys_time[device_id], sys_time)        
+        self.edge_aoi = event_time - self.sys_time + 1 
+
+    def step_aoi_info(self):
+        self.edge_aoi += 1
+        self.service_aoi += 1
+        self.last_schedule += 1
+
+    def step(self, action_s, action_p):
+        s = action_s
+        p = action_p
+
+        reward_s, reward_p = 0.0, 0.0
+        self.step_cur_time()
+        self.step_aoi_info()
+
+        done = False
+        if self.left_frame <= 1:
+            done = True
+
+        ## Collect Data from Devices
+        for device in self.devices:
+            device.step(self.get_cur_time())
+            if int(s[device.get_id()]) == 1:
+                self.last_schedule[device.get_id()] = 0
+                self.link.packet_enter_line(self.get_cur_time(), device)
+        packets_to_process = self.link.get_packets_to_process(self.get_cur_time())
+    
+        self.process_packets(packets_to_process, self.get_cur_time())
+        device_priority = self.service.get_device_priority()
+        reward_s = - np.mean( self.edge_aoi / self.max_step * device_priority / np.sum(device_priority)  )
+
+        ## Process Services
+        K = self.service.get_push_limit()
+        push_devices_id = np.argpartition(p, -K)[ -K:]
+        for device_id in push_devices_id:
+            self.service_aoi[device_id] = self.edge_aoi[device_id]
+        reward_p = -np.mean(self.service.device_priority * self.service_aoi /self.max_step /  np.sum(device_priority) )
+
+        # print("timestep", self.left_frame)
+        # print("action_s: ", s, "action_p:", push_devices_id)
+        # print("service aoi:", self.service_aoi, "edge aoi:" ,self.edge_aoi, "last schedule:", self.last_schedule, "device priority:", device_priority)
+        
+        return self.get_obs(), reward_s, reward_p, done, 1
+    
+    def get_obs(self):
+        self.state = [self.left_frame, self.service.get_push_limit(), len(self.link.buffer)]
+        self.state.extend(self.service.get_device_priority())
+        self.state.extend(self.edge_aoi)
+        self.state.extend(self.service_aoi)
+        self.state.extend(self.last_schedule)
+        self.state = np.array(self.state, dtype=np.float32)
+        return self.state
+
+    def render(self, mode='human'):
+        pass
+        
+    def reset(self, option = 'info_clear'):
+        
+        self.cur_time = 0
+        self.left_frame = self.max_step
+        #if option == 'info_clear':
+        for device in self.devices:
+            device.reset()
+        self.sys_time = np.array([int(0) for _ in range(self.device_num)], dtype=np.float32)
+        self.last_schedule = np.array([int(0) for _ in range(self.device_num)], dtype=np.float32)
+
+        self.edge_aoi = np.array([int(1) for _ in range(self.device_num)],dtype=np.float32)
+        self.service_aoi = np.array([int(1) for _ in range(self.device_num)],dtype=np.float32)
+        self.link.reset()
+
+        self.service.service_update()
+
+        return self.get_obs() 
+
+    
+
+def main():
+    random.seed(2)
+    env = DTN(device_num=10)
+    for i in range(20):
+        #env.step(np.array([1, 0, 0, 0, 0]), np.array([0.6, 0.3, 0.1, 0.4, 0.5]))
+        env.step(np.array([random.randint(0, 1) for _ in range(env.device_num)]), np.array([random.uniform(0, 1) for _ in range(env.device_num)]))
+
+if __name__ == "__main__":
+    main()
+    
+         
+
+        
+
+        
+
+
+
