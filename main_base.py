@@ -73,7 +73,10 @@ def evaluate_policy(env, model, render):
             step = 0
             total_t = opt.eval_period
             while step < total_t:
-                a_s, _= model.select_action(torch.from_numpy(s).float().to(device), 'sample')
+                selected_devices_id = np.argpartition(env.edge_aoi, -env.link.bandwidth)[-env.link.bandwidth:] 
+                a_s = np.zeros(env.device_num)
+                
+                a_s[selected_devices_id] = 1
                 a_p = np.random.uniform(0, 1, size=env.device_num)
                 s_prime, _, _, _, info = env.step(a_s, a_p)
                 ep_r += info['edge_aoi']  # Collect the service AOI as the reward
@@ -159,22 +162,22 @@ def main():
             # print("Step:", steps, "Reward_s:", r_s, "Reward_p:", r_p, "Done:", done)
             # print("Step:", steps, "a_s:", a_s, "a_p:", a_p, "Done:", done)
             # print("left frame:", env.left_frame, "edge aoi:", env.edge_aoi, "service aoi:", env.service_aoi)
-            model.put_data((s, a_s, r_s, s_prime, log_s, done)) 
+            #model.put_data((s, a_s, r_s, s_prime, log_s, done)) 
             s = s_prime
 
             '''update if its time'''
-            if traj_lenth % T_horizon == 0:
-                a_s_loss, v_loss = model.train()
-                traj_lenth = 0
-                if write:
-                    writer.add_scalar('a_s_loss', a_s_loss, global_step=total_steps)
-                    writer.add_scalar('v_loss', v_loss, global_step=total_steps)
+            # if traj_lenth % T_horizon == 0:
+            #     a_s_loss, v_loss = model.train()
+            #     traj_lenth = 0
+            #     if write:
+            #         writer.add_scalar('a_s_loss', a_s_loss, global_step=total_steps)
+            #         writer.add_scalar('v_loss', v_loss, global_step=total_steps)
 
             '''record & log'''
             if total_steps % eval_interval == 0:
                 score  = evaluate_policy(eval_env, model, False)
-                if write:
-                    writer.add_scalar('ep_r', score, global_step=total_steps)
+                #if write:
+                #    writer.add_scalar('ep_r', score, global_step=total_steps)
                 print('seed:', seed, 'steps: {}'.format(int(total_steps)), 'score:', score)
    
             total_steps += 1

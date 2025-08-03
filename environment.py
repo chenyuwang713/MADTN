@@ -15,11 +15,10 @@ min_loss_rate, max_loss_rate = (0.05, 0.5)
 
 
 class Device():
-    def __init__(self, device_id, gen_mode="uniform", max_step=100):
+    def __init__(self, device_id, gen_mode="uniform"):
         self.device_id = device_id
         self.gen_mode = gen_mode
         self.sys_time = 0
-        self.max_step = max_step
 
         self.delay_bound = random.randint(min_delay, max_delay)
         self.loss_rate = random.uniform(min_loss_rate, max_loss_rate)
@@ -54,8 +53,7 @@ class Device():
 
 
 class Link():
-    def __init__(self, max_step, bandwidth=None, buffer_size=None):
-        self.max_step = max_step
+    def __init__(self, bandwidth=None, buffer_size=None):
         self.bandwidth = bandwidth if bandwidth is not None else random.randint(min_bw, max_bw)
         self.buffer_size = buffer_size if buffer_size is not None else random.randint(min_buffer, max_buffer)
 
@@ -89,14 +87,15 @@ class Link():
 
 
 class Service():
-    def __init__(self,  device_num:int):
+    def __init__(self,  device_num:int, max_channel_num:int = None):
         self.device_num = device_num
         self.priority = list(range(self.device_num))
-        self.channel_num = random.randint(1, self.device_num)
+        self.max_channel_num = max_channel_num
+        self.channel_num = random.randint(1, self.max_channel_num)
         random.shuffle(self.priority) 
 
     def service_update(self):
-        self.channel_num = random.randint(1, self.device_num)
+        self.channel_num = random.randint(1, self.max_channel_num)
         random.shuffle(self.priority) 
         
     def get_priority(self):
@@ -105,24 +104,28 @@ class Service():
     def get_channel_num(self):
         return self.channel_num
     
+    def reset(self):
+        self.channel_num = random.randint(1, self.max_channel_num)
+        random.shuffle(self.priority)
+    
 
 class DTN(gym.Env):
-    def __init__(self, device_num: int = 10):
-        self.max_step = 100
+    def __init__(self, device_num: int = 10, max_channel_num: int = 10, max_step: int = 100):
+        self.max_step = max_step
         self.left_frame = self.max_step
         self.device_num = device_num
+        self.max_channel_num = max_channel_num
 
-        self.devices = [Device(id, gen_mode='uniform', max_step=self.max_step) for id in range(self.device_num)]
-        self.service = Service(device_num=self.device_num)
-        self.link = Link(max_step=self.max_step)
+        self.devices = [Device(id, gen_mode='uniform') for id in range(self.device_num)]
+        self.service = Service(device_num=self.device_num, max_channel_num=self.max_channel_num)
+        self.link = Link()
 
         self.cur_time = 0
         self.sys_time = np.array([int(0) for _ in range(self.device_num)])
-        self.last_schedule = np.array([int(0) for _ in range(self.device_num)])
-        self.last_push = np.array([int(0) for _ in range(self.device_num)])
-
-        self.edge_aoi = np.array([int(1) for _ in range(self.device_num)], dtype=np.float32)
-        self.service_aoi = np.array([int(1) for _ in range(self.device_num)], dtype=np.float32)
+        self.last_schedule = np.array([int(1) for _ in range(self.device_num)])
+        self.last_push = np.array([int(1) for _ in range(self.device_num)])
+        self.edge_aoi = np.array([int(1) for _ in range(self.device_num)])
+        self.service_aoi = np.array([int(1) for _ in range(self.device_num)])
     
         # State: [ (CURR_FRAME, BUFF_LENGTH) Edge AOI, Last_SENT_PERIORD, WEIGHT_OF DEVICE]
         self.observation_space = spaces.Box(
@@ -143,7 +146,7 @@ class DTN(gym.Env):
         for packet in packets:
             _, sys_time, _, device_id = packet
             self.sys_time[device_id] = max(self.sys_time[device_id], sys_time)        
-        self.edge_aoi = event_time - self.sys_time + 1 
+        self.edge_aoi = event_time - self.sys_time 
 
     def step_aoi_info(self):
         self.edge_aoi += 1
@@ -151,27 +154,26 @@ class DTN(gym.Env):
         self.last_schedule += 1
         self.last_push += 1
 
-
     def step(self, action_s, action_p):
         s = action_s
         p = action_p
         info = {}
 
-        reward_s = 0.0
         self.step_cur_time()
-        self.step_aoi_info()
-
-
+        
         #reward_s = - np.mean( ( (self.service_aoi - self.edge_aoi) ** 2 + self.edge_aoi) * self.service.get_priority())
-        reward_s = - np.mean(self.edge_aoi * self.service.get_priority())
-        channel_num = self.service.get_channel_num()
-        push_devices_id = np.argsort(p)[-channel_num:] if channel_num > 0 else []
-        for device_id in push_devices_id:
-            self.last_push[device_id] = 0
-            self.service_aoi[device_id] = self.edge_aoi[device_id]
-        reward_p = - np.mean(self.service_aoi * self.service.get_priority())
+        #reward_s = - np.mean(self.edge_aoi * self.service.get_priority())
 
-        info['service_aoi'] = np.mean( self.service_aoi * self.service.get_priority())
+        reward_s = - np.mean(self.edge_aoi * self.service.get_priority())
+        reward_p = - np.mean(self.service_aoi * self.service.get_priority())
+        
+        # channel_num = self.service.get_channel_num()
+        # push_devices_id = np.argsort(p)[-channel_num:] if channel_num > 0 else []
+        # for device_id in push_devices_id:
+        #     self.last_push[device_id] = 0
+        #     self.service_aoi[device_id] = self.edge_aoi[device_id]
+
+        #info['service_aoi'] = np.mean( self.service_aoi * self.service.get_priority())
         info['edge_aoi'] = np.mean( self.edge_aoi * self.service.get_priority())
         
         ## Collect Data from Devices
@@ -181,20 +183,19 @@ class DTN(gym.Env):
                 self.last_schedule[device.get_id()] = 0
                 self.link.packet_enter_line(self.get_cur_time(), device)
         packets_to_process = self.link.get_packets_to_process(self.get_cur_time())
-        
         self.process_packets(packets_to_process, self.get_cur_time())
 
-        self.service.service_update()
+        self.step_aoi_info()
+        
         #print("timestep: ", self.get_cur_time(), "left_time_frame:", self.left_frame, "action:", action_s, "reward_s:", reward_s)
         #print("edge_aoi:", self.edge_aoi, "last_schedule:", self.last_schedule, "sys_time:", self.sys_time)
-        
+
         done = False
         if self.left_frame <= 0:
+            self.service.service_update()
             self.left_frame = self.max_step
             done = True
-        # print("action_s: ", s, "action_p:", push_devices_id)
-        # print("edge aoi:" ,self.edge_aoi, "last schedule:", self.last_schedule, "action_s:", s)
-        
+
         return self.get_obs(), reward_s, reward_p, done, info
     
     def get_obs(self):
@@ -216,19 +217,23 @@ class DTN(gym.Env):
         self.cur_time = 0
         for device in self.devices:
             device.reset()
-        self.sys_time = np.array([int(0) for _ in range(self.device_num)], dtype=np.float32)
-        self.last_schedule = np.array([int(0) for _ in range(self.device_num)], dtype=np.float32)
-        self.edge_aoi = np.array([int(1) for _ in range(self.device_num)],dtype=np.float32)
         self.link.reset()
+        self.service.reset()
+        self.sys_time = np.array([int(0) for _ in range(self.device_num)], dtype=np.float32)
+        self.last_schedule = np.array([int(1) for _ in range(self.device_num)], dtype=np.float32)
+        self.last_push = np.array([int(1) for _ in range(self.device_num)], dtype=np.float32)
+
+        self.edge_aoi = np.array([int(1) for _ in range(self.device_num)],dtype=np.float32)
+        self.service_aoi = np.array([int(1) for _ in range(self.device_num)], dtype=np.float32)
 
         return self.get_obs() 
 
 def main():
     random.seed(2)
     env = DTN(device_num=10)
-    for i in range(502):
+    for i in range(102):
         #env.step(np.array([1, 0, 0, 0, 0]), np.array([0.6, 0.3, 0.1, 0.4, 0.5]))
-        env.step(np.array([random.randint(0, 1) for _ in range(env.device_num)]))
+        env.step( np.array([random.randint(0, 1) for _ in range(env.device_num)]), np.array([0.6, 0.3, 0.1, 0.4, 0.5] ))
 
 if __name__ == "__main__":
     main()

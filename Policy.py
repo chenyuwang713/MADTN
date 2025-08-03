@@ -129,7 +129,6 @@ class PPO(object):
                 torch.nn.utils.clip_grad_norm_(self.actor_s.parameters(), 40)
                 self.actor_s_optimizer.step()
 
-
                 '''Critic Update'''
                 c_loss = (self.critic(s[index]) - td_target_s[index]).pow(2).mean()  
                 value_loss += c_loss
