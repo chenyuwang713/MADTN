@@ -121,9 +121,7 @@ class Service():
     
 
 class DTN(gym.Env):
-    def __init__(self, env_mode: str = 'edge',device_num: int = 10, max_channel_num: int = 10, max_step: int = 100):
-        self.env_mode = env_mode
-
+    def __init__(self, device_num: int = 10, max_channel_num: int = 10, max_step: int = 100):
         self.max_step = max_step
         self.left_frame = self.max_step
         self.device_num = device_num
@@ -140,16 +138,13 @@ class DTN(gym.Env):
         self.edge_aoi = np.array([int(1) for _ in range(self.device_num)])
         self.service_aoi = np.array([int(1) for _ in range(self.device_num)])
     
-        if self.env_mode == 'edge':
-            self.observation_space = spaces.Box(
-                low = np.array([0 for _ in range(3 * self.device_num + 2)], dtype=np.float32),
-                high = np.array([np.finfo(np.float32).max for _ in range(3 * self.device_num + 2)], dtype=np.float32))
-        elif self.env_mode == 'hybrid':
-            self.observation_space = spaces.Box(
-                low = np.array([0 for _ in range(5 * self.device_num + 3)], dtype=np.float32),
-                high = np.array([np.finfo(np.float32).max for _ in range(5 * self.device_num + 3)], dtype=np.float32))
-        #self.action_s_num = 2 ** self.device_num
-        self.action_s_space = spaces.MultiBinary(self.device_num)
+        # State: [ (CURR_FRAME, BUFF_LENGTH) Edge AOI, Last_SENT_PERIORD, WEIGHT_OF DEVICE]
+        self.observation_space = spaces.Box(
+            low = np.array([0 for _ in range(5 * self.device_num + 3)], dtype=np.float32),
+            high = np.array([np.finfo(np.float32).max for _ in range(5 * self.device_num + 3)], dtype=np.float32))
+
+        self.action_s_num = 2 ** self.device_num
+        self.action_s_space = spaces.Discrete(self.action_s_num)
         self.action_p_space = spaces.Box(low=0, high=1, shape=(self.device_num,), dtype=np.float32)
 
     def get_cur_time(self):
@@ -173,21 +168,20 @@ class DTN(gym.Env):
         self.last_push += 1
 
     def step(self, action_s, action_p):
-        s = action_s
+        s = action_map(int(action_s), self.device_num)
         p = action_p
         info = {}
 
         self.step_cur_time()
-    
-        if self.env_mode == 'edge':
-            reward_s = - np.mean(self.edge_aoi * self.service.get_priority())
-            reward_p = - np.mean(self.service_aoi * self.service.get_priority())
-        elif self.env_mode == 'hybrid':
-            reward_s = - np.mean( ( (self.service_aoi - self.edge_aoi) ** 2  + self.edge_aoi) * self.service.get_priority())
-            reward_p = - np.mean((self.service_aoi - self.edge_aoi) ** 2 + self.service_aoi * self.service.get_priority())
-        else:
-            raise NotImplementedError("Environment mode not implemented: {}".format(self.env_mode))
 
+
+        #print(self.cur_time, self.sys_time, [device.next_gen_time for device in self.devices], s)
+
+        
+       # reward_s = - np.mean( ( (self.service_aoi - self.edge_aoi) ** 2  + self.edge_aoi) * self.service.get_priority())
+        reward_s = - np.mean(self.edge_aoi * self.service.get_priority())
+        reward_p = - np.mean(self.service_aoi * self.service.get_priority())
+        
         channel_num = self.service.get_channel_num()
         push_devices_id = np.argpartition(p, -channel_num)[-channel_num:]
         for device_id in push_devices_id:
@@ -217,22 +211,14 @@ class DTN(gym.Env):
         return self.get_obs(), reward_s, reward_p, done, info
     
     def get_obs(self):
-        if self.env_mode == 'edge':
-            self.state = [self.left_frame, len(self.link.buffer)]
-            self.state.extend(self.edge_aoi)
-            self.state.extend(self.last_schedule)
-            self.state.extend(self.service.get_priority())
-            self.state = np.array(self.state, dtype=np.float32)
-        elif self.env_mode == 'hybrid':
-            self.state = [self.left_frame, len(self.link.buffer), self.service.get_channel_num()]
-            self.state.extend(self.edge_aoi)
-            self.state.extend(self.service_aoi)
-            self.state.extend(self.last_schedule)
-            self.state.extend(self.last_push)
-            self.state.extend(self.service.get_priority())
-            self.state = np.array(self.state, dtype=np.float32)
-        else:
-            raise NotImplementedError("Environment mode not implemented: {}".format(self.env_mode))
+        self.state = [self.left_frame, len(self.link.buffer), self.service.get_channel_num()]
+        #self.state = [self.left_frame, len(self.link.buffer)]
+        self.state.extend(self.edge_aoi)
+        self.state.extend(self.service_aoi)
+        self.state.extend(self.last_schedule)
+        self.state.extend(self.last_push)
+        self.state.extend(self.service.get_priority())
+        self.state = np.array(self.state, dtype=np.float32)
         return self.state
 
     def render(self, mode='human'):

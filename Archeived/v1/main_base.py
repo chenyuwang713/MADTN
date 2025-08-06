@@ -11,7 +11,7 @@ import torch
 import numpy as np
 import random
 
-from Policy import PPO_Edge, PPO_Hybrid, device 
+from Policy import PPO, device 
 
 def str2bool(v):
     '''transfer str to bool for argparse'''
@@ -45,7 +45,7 @@ parser.add_argument('--eval_period', type=int, default=1000, help='Model evaluat
 parser.add_argument('--eval_turns', type=int, default=3, help='Number of evaluation turns')
 parser.add_argument('--env_reset_interval', type=int, default=1000, help='Environment reset interval')
 
-parser.add_argument('--beta', type=float, default=0.6, help='Variance Factor')
+parser.add_argument('--beta', type=float, default=0.2, help='Variance Factor')
 parser.add_argument('--gamma', type=float, default=0.99, help='Discounted Factor')
 parser.add_argument('--lambd', type=float, default=0.95, help='GAE Factor')
 parser.add_argument('--clip_rate', type=float, default=0.2, help='PPO Clip rate')
@@ -59,12 +59,12 @@ parser.add_argument('--entropy_coef', type=float, default=1e-3, help='Entropy co
 parser.add_argument('--entropy_coef_decay', type=float, default=0.99, help='Decay rate of entropy_coef')
 parser.add_argument('--adv_normalization', type=str2bool, default=False, help='Advantage normalization')
 
-parser.add_argument('--env_mode', type=str, default='edge', help='Environment mode, default is edge, or hybrid')
-parser.add_argument('--baseline', type=str2bool, default=False, help='Baseline method for comparison, random or roundrobin')
+
 opt = parser.parse_args()
 print(opt)
 
-def evaluate_policy(env, model):
+
+def evaluate_policy(env, model, render):
     with torch.no_grad():
         scores_service = 0.
         scores_edge = 0.
@@ -77,23 +77,13 @@ def evaluate_policy(env, model):
             step = 0
             total_t = opt.eval_period
             while step < total_t:
-                if opt.baseline == False:
-                    if opt.env_mode == 'hybrid':
-                        a_s, _ = model.evaluate(s, 'sample')
-                        s_p = np.append(s, a_s)
-                        a_p, _ = model.evaluate(s_p, 'push')
-                    elif opt.env_mode == 'edge':
-                        a_s, _ = model.evaluate(s, 'sample')
-                        a_p =  env.edge_aoi * env.service.get_priority()
-                else:
-                    s_id = np.random.choice(env.device_num, env.link.bandwidth)  # Test for baseline - Keep Commented unless Sampleing ramdom action from action space
-                    a_s = np.zeros(env.device_num)
-                    a_s[s_id] = 1
-                    a_p =  env.edge_aoi * env.service.get_priority()  # Use edge AOI as push action
-                   
+                a_s = np.random.randint(0, env.action_s_num-1)
+                a_p = np.random.uniform(0, 1, size=env.device_num)
                 s_prime, _, _, _, info = env.step(a_s, a_p)
                 ep_r_edge += info['edge_aoi']  # Collect the edge AOI as the reward
                 ep_r_service += info['service_aoi']  # Collect the service AOI as the reward
+                #print(ep_r_edge, ep_r_service)
+                #print(info['service_aoi'], info['edge_aoi'])
                 s = s_prime
                 step += 1
             scores_service += ep_r_service / total_t
@@ -102,17 +92,18 @@ def evaluate_policy(env, model):
 
 def main():    
     seed = opt.seed
+    
     torch.manual_seed(seed)
     np.random.seed(seed)
     random.seed(seed)
 
-    env = DTN(env_mode = opt.env_mode, device_num=opt.device_num, max_step=opt.max_step, max_channel_num=opt.max_channel_num)
+    env = DTN(device_num=opt.device_num, max_step=opt.max_step, max_channel_num=opt.max_channel_num)
     eval_env = copy.deepcopy(env)
+
     print("bandwidth:", env.link.bandwidth, "buffer size:", env.link.buffer_size)
     for i in range(env.device_num):
         print("Device: ", i, "loss rate:", env.devices[i].get_loss_rate(), " delay:", env.devices[i].get_delay())
-    print('\n')
-    
+   
     state_dim = env.observation_space.shape[0]
     action_s_dim = env.action_s_space.n
     action_p_dim = env.action_p_space.shape[0]
@@ -122,7 +113,7 @@ def main():
     if write:
         timenow = str(datetime.now())[0:-10]
         timenow = ' ' + timenow[0:13] + '_' + timenow[-2::]
-        writepath = 'runs_{}/{}-device-seed{}'.format(opt.env_mode,env.device_num, opt.seed) + timenow
+        writepath = 'runs_v1/{}-device-seed{}'.format(env.device_num, opt.seed) + timenow
         if os.path.exists(writepath): shutil.rmtree(writepath)
         writer = SummaryWriter(log_dir=writepath)
 
@@ -133,7 +124,7 @@ def main():
     eval_interval = opt.eval_interval #in steps
     save_interval = opt.save_interval #in steps
 
-    print('Env-device_num:', env.device_num, ' state_dim:', state_dim, '  action_sample_dim:', action_s_dim, ' action_push_dim', action_p_dim, '  Random Seed:', seed, ' max_e_steps:', max_e_steps)
+    print('Env-device_num:', env.device_num, ' state_dim:', state_dim, '  action_sample_dim:', action_s_dim, '  Random Seed:', seed, ' max_e_steps:', max_e_steps)
     print('\n')
 
     kwargs = {
@@ -142,7 +133,6 @@ def main():
         "action_p_dim": action_p_dim,
         "gamma": opt.gamma,
         "lambd": opt.lambd,
-        "beta": opt.beta,
         "net_width": opt.net_width,
         "a_lr": opt.a_lr,
         "v_lr": opt.v_lr,
@@ -156,10 +146,7 @@ def main():
     }
 
     if not os.path.exists('model'): os.mkdir('model')
-    if env.env_mode == 'hybrid':
-        model = PPO_Hybrid(**kwargs) 
-    else:
-        model = PPO_Edge(**kwargs)
+    model = PPO(**kwargs) 
     if Loadmodel: model.load(ModelIdex)
 
     traj_lenth = 0
@@ -171,55 +158,37 @@ def main():
             done, steps, ep_r = False, 0, 0
 
         while not done:
+            traj_lenth += 1
+            steps += 1
+            a_s, log_s = model.select_action(torch.from_numpy(s).float().to(device), 'sample')
+            #s_p = np.append(s, a_s)
+            a_p, log_p = model.select_action(torch.from_numpy(s).float().to(device), 'push')
+            s_prime, r_s, r_p, done, info = env.step(a_s, a_p)
+            # print("Step:", steps, "Reward_s:", r_s, "Reward_p:", r_p, "Done:", done)
+            # print("Step:", steps, "a_s:", a_s, "a_p:", a_p, "Done:", done)
+            # print("left frame:", env.left_frame, "edge aoi:", env.edge_aoi, "service aoi:", env.service_aoi)
+            #model.put_data((s, a_s, r_s, a_p, r_p, s_prime, log_s, log_p, done)) 
+            s = s_prime
+
+            '''update if its time'''
+            # if traj_lenth % T_horizon == 0:
+            #     a_s_loss, a_p_loss, v_loss = model.train()
+            #     traj_lenth = 0
+            #     if write:
+            #         writer.add_scalar('a_s_loss', a_s_loss, global_step=total_steps)
+            #         writer.add_scalar('a_p_loss', a_p_loss, global_step=total_steps)
+            #         writer.add_scalar('v_loss', v_loss, global_step=total_steps)
+
             '''record & log'''
             if total_steps % eval_interval == 0:
-                score_service, score_edge = evaluate_policy(eval_env, model)
+                score_service, score_edge = evaluate_policy(eval_env, model, False)
                 if write:
                     writer.add_scalar('ep_r_service', score_service, global_step=total_steps)
                     writer.add_scalar('ep_r_edge', score_edge, global_step=total_steps)
                 print('seed:', seed, 'steps: {}'.format(int(total_steps)), 'score_service: {:.4f}'.format(score_service), 'score_edge: {:.4f}'.format(score_edge))
 
-            traj_lenth += 1
-            steps += 1
             total_steps += 1
-            if opt.baseline: break
-            
-            if opt.env_mode == 'hybrid':
-                a_s, log_s = model.select_action(torch.from_numpy(s).float().to(device), 'sample')
-                a_s_sample, _ = model.sample_action(s, 'sample')
 
-                s_p = np.append(s, a_s)
-                a_p, log_p = model.select_action(s_p, 'push')
-                a_p_sample, _ = model.sample_action(s_p, 'push')
-            else:
-                a_s, log_s = model.select_action(torch.from_numpy(s).float().to(device), 'sample')
-                a_p =  env.edge_aoi * env.service.get_priority()
-
-            s_prime, r_s, r_p, done, _ = env.step(a_s, a_p)
-            if opt.env_mode == 'hybrid':
-                model.put_data((s, a_s, r_s, a_s_sample, a_p, r_p, a_p_sample, s_prime, log_s, log_p, done)) 
-                '''update if its time'''
-                if traj_lenth % T_horizon == 0:
-                    a_s_loss, a_p_loss, v_loss = model.train()
-                    traj_lenth = 0
-                    if write:
-                        writer.add_scalar('a_s_loss', a_s_loss, global_step=total_steps)
-                        writer.add_scalar('a_p_loss', a_p_loss, global_step=total_steps)
-                        writer.add_scalar('v_loss', v_loss, global_step=total_steps)
-            elif opt.env_mode == 'edge':
-                model.put_data((s, a_s, r_s, s_prime, log_s, done))
-                '''update if its time'''
-                if traj_lenth % T_horizon == 0:
-                    a_s_loss, v_loss = model.train()
-                    traj_lenth = 0
-                    if write:
-                        writer.add_scalar('a_s_loss', a_s_loss, global_step=total_steps)
-                        writer.add_scalar('v_loss', v_loss, global_step=total_steps)
-                s = s_prime
-            else:
-                NotImplementedError('Environment mode not implemented')
-
-            
             '''save model'''
             if opt.model_save and total_steps % save_interval == 0:
                 model.save(total_steps)

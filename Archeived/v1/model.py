@@ -51,6 +51,7 @@ class MultiBinaryPolicy(nn.Module):
     def pi(self, state):
         n = self.forward(state)
         pi = torch.sigmoid(self.l3(n))
+
         return pi
 
 class DiscretePolicy(nn.Module):
@@ -85,25 +86,3 @@ class HybridValue(nn.Module):
         v = torch.tanh(self.C2(v))
         v = self.C3(v)
         return v
-    
-
-
-class RewardContinuous(nn.Module):
-    def __init__(self, state_dim, a_s_dim, a_p_dim, net_width):
-        super(RewardContinuous, self).__init__()
-        self.s = nn.Linear(state_dim, net_width)
-        self.af = nn.Linear(a_s_dim, net_width)
-        self.ap = nn.Linear(a_p_dim, net_width)
-        self.l1 = nn.Linear(net_width+net_width+net_width, net_width)
-        self.l2 = nn.Linear(net_width, net_width)
-        self.l3 = nn.Linear(net_width, 1)
-
-    def forward(self, s, a_s, a_p):
-        h_s = self.s(s)
-        h_as = self.af(a_s)
-        h_ap = self.ap(a_p)
-        h = torch.cat([h_s, h_as, h_ap], -1)
-        r = torch.tanh(self.l1(h))
-        r = torch.tanh(self.l2(r))
-        r = self.l3(r)
-        return r
